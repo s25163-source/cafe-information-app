@@ -18,11 +18,11 @@ if 'counter' not in st.session_state:
 if 'user_inside' not in st.session_state:
     st.session_state.user_inside = False
 
-# 지도 뷰 상태 유지 (초기 위치: 제주도 중심, Zoom: 12)
+# 사용자가 조작한 지도의 최신 중심 위치와 확대 레벨 상태 저장
 if 'map_center' not in st.session_state:
-    st.session_state.map_center = [33.38, 126.53]
+    st.session_state.map_center = [33.38, 126.53]  # 초기값: 제주도 중심
 if 'map_zoom' not in st.session_state:
-    st.session_state.map_zoom = 12
+    st.session_state.map_zoom = 12                  # 초기값: 확대 레벨 12
 
 st.title("☕ 제주도 카페 위치 정보 & 구역 관리 앱")
 
@@ -43,7 +43,7 @@ df = load_jeju_store_data()
 st.sidebar.write(f"📊 등록된 총 카페 수: **{len(df):,}개**")
 st.sidebar.info("📌 지도 화면 중앙 기준 가까운 카페 **50개**가 자동 표시됩니다.")
 
-# 3. 검색창 구현
+# 3. 카페 검색창
 search_term = st.selectbox(
     "카페를 검색하세요:",
     options=["선택하세요"] + list(df['상호명'].unique())
@@ -51,29 +51,30 @@ search_term = st.selectbox(
 
 if search_term != "선택하세요":
     cafe_data = df[df['상호명'] == search_term].iloc[0]
-    st.session_state.selected_cafe = cafe_data
-    st.session_state.active_zone = {
-        'name': cafe_data['상호명'],
-        'lat': float(cafe_data['위도']),
-        'lon': float(cafe_data['경도'])
-    }
-    # 검색 시에만 해당 위치로 이동 및 확대
-    st.session_state.map_center = [float(cafe_data['위도']), float(cafe_data['경도'])]
-    st.session_state.map_zoom = 16
+    # 이전 선택과 다른 새로운 카페를 검색했을 때만 해당 위치로 시점 이동
+    if st.session_state.selected_cafe is None or st.session_state.selected_cafe['상호명'] != search_term:
+        st.session_state.selected_cafe = cafe_data
+        st.session_state.active_zone = {
+            'name': cafe_data['상호명'],
+            'lat': float(cafe_data['위도']),
+            'lon': float(cafe_data['경도'])
+        }
+        st.session_state.map_center = [float(cafe_data['위도']), float(cafe_data['경도'])]
+        st.session_state.map_zoom = 16
 
-# 4. 지도 중심점 기준 50개 카페 추출 함수
+# 4. 지도 중심점 기준 상위 50개 카페 추출 함수
 def get_nearest_50_cafes(center_lat, center_lon, data):
     data_copy = data.copy()
     data_copy['dist'] = (data_copy['위도'] - center_lat)**2 + (data_copy['경도'] - center_lon)**2
     return data_copy.nsmallest(50, 'dist')
 
-# 현재 세션에 저장된 위치와 Zoom 크기로 지도 생성
+# 사용자가 지정해 둔 최신 화면 중심(map_center)과 크기(map_zoom)로 지도 생성
 m = folium.Map(
     location=st.session_state.map_center, 
     zoom_start=st.session_state.map_zoom
 )
 
-# 주변 50개 카페 마커 추가
+# 화면 중앙 기준 가까운 50개 마커 표시
 visible_df = get_nearest_50_cafes(st.session_state.map_center[0], st.session_state.map_center[1], df)
 
 for idx, row in visible_df.iterrows():
@@ -84,7 +85,7 @@ for idx, row in visible_df.iterrows():
         icon=folium.Icon(color='orange', icon='coffee', prefix='fa')
     ).add_to(m)
 
-# 구역 표시
+# 100m 구역 표시
 if st.session_state.active_zone:
     zone = st.session_state.active_zone
     folium.Circle(
@@ -97,17 +98,22 @@ if st.session_state.active_zone:
         popup=f"{zone['name']} (100m 구역)"
     ).add_to(m)
 
-# 지도 렌더링
-map_data = st_folium(m, width=800, height=500, key="jeju_map")
+# 지도 렌더링 (st_folium의 반환값을 통해 실시간 지도 좌표/줌 감지)
+map_data = st_folium(
+    m, 
+    width=800, 
+    height=500, 
+    key="jeju_map"
+)
 
-# 지도 조작 시 현재 화면 좌표와 Zoom 레벨을 실시간 저장 (rerun 호출 제거하여 위치 고정)
+# 5. 지도의 최신 시점(중심 좌표 & Zoom)을 세션 상태에 지속 업데이트
 if map_data:
-    if map_data.get("center"):
+    if map_data.get("center") is not None:
         st.session_state.map_center = [map_data["center"]["lat"], map_data["center"]["lng"]]
-    if map_data.get("zoom"):
+    if map_data.get("zoom") is not None:
         st.session_state.map_zoom = map_data["zoom"]
 
-# 마커 클릭 이벤트
+# 마커 클릭 처리
 if map_data and map_data.get("last_object_clicked"):
     clicked_lat = map_data["last_object_clicked"]["lat"]
     clicked_lon = map_data["last_object_clicked"]["lng"]
@@ -115,16 +121,16 @@ if map_data and map_data.get("last_object_clicked"):
     matched = df[(abs(df['위도'] - clicked_lat) < 0.0001) & (abs(df['경도'] - clicked_lon) < 0.0001)]
     if not matched.empty:
         cafe_data = matched.iloc[0]
-        # 활성 구역만 업데이트하고 화면 뷰는 유지
-        if st.session_state.active_zone != {'name': cafe_data['상호명'], 'lat': float(cafe_data['위도']), 'lon': float(cafe_data['경도'])}:
-            st.session_state.active_zone = {
-                'name': cafe_data['상호명'],
-                'lat': float(cafe_data['위도']),
-                'lon': float(cafe_data['경도'])
-            }
+        new_zone = {
+            'name': cafe_data['상호명'],
+            'lat': float(cafe_data['위도']),
+            'lon': float(cafe_data['경도'])
+        }
+        if st.session_state.active_zone != new_zone:
+            st.session_state.active_zone = new_zone
             st.rerun()
 
-# 5. 브라우저 위치 기반 구역 확인 및 인원수 카운트
+# 6. 브라우저 위치 기반 구역 확인 및 인원수 카운트
 st.markdown("---")
 st.subheader("📍 사용자 위치 기반 구역 확인")
 
