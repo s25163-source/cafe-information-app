@@ -1,5 +1,6 @@
 streamlit
+pandas
 folium
 streamlit-folium
 geopy
-pandas
+streamlit-js-eval
