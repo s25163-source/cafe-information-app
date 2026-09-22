@@ -1,11 +1,11 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import folium
 from streamlit_folium import st_folium
 from geopy.distance import geodesic
 from streamlit_js_eval import get_geolocation
 import os
-from scipy.spatial import cKDTree
 
 st.set_page_config(page_title="제주 카페 위치 정보 앱", layout="wide")
 
@@ -19,33 +19,34 @@ if 'counter' not in st.session_state:
 if 'user_inside' not in st.session_state:
     st.session_state.user_inside = False
 
-# 지도 뷰 상태 유지 (초기 위치: 제주도 중심)
+# 사용자가 조작한 지도의 중심 좌표 및 확대 레벨 유지
 if 'map_center' not in st.session_state:
-    st.session_state.map_center = [33.38, 126.53]
+    st.session_state.map_center = [33.38, 126.53]  # 초기값: 제주도 중심
 if 'map_zoom' not in st.session_state:
-    st.session_state.map_zoom = 12
+    st.session_state.map_zoom = 12                  # 초기값: 확대 12
 
 st.title("☕ 제주도 카페 위치 정보 & 구역 관리 앱")
 
-# 2. store (1).csv 및 cKDTree 구조 캐싱 (속도 최적화 핵심)
+# 2. store (1).csv 데이터 로드 및 좌표 배열 캐싱
 @st.cache_data
 def load_jeju_store_data():
     file_path = 'store (1).csv'
     if os.path.exists(file_path):
         df = pd.read_csv(file_path)
         df = df.dropna(subset=['상호명', '위도', '경도']).reset_index(drop=True)
-        # 빠른 검색을 위한 Spatial Tree(cKDTree) 구축
-        coords = df[['위도', '경도']].values
-        tree = cKDTree(coords)
-        return df, tree
+        coords = df[['위도', '경도']].to_numpy(dtype=np.float32)
+        return df, coords
     else:
         st.error("`store (1).csv` 파일을 찾을 수 없습니다. 깃허브 리포지토리에 파일을 올려주세요.")
         st.stop()
 
-df, spatial_tree = load_jeju_store_data()
+df, coords_array = load_jeju_store_data()
 
 st.sidebar.write(f"📊 등록된 총 카페 수: **{len(df):,}개**")
-st.sidebar.info("⚡ cKDTree 알고리즘 적용으로 속도가 최적화되었습니다.")
+st.sidebar.info("📍 내 위치(파란 마커)가 지도 위에 표시됩니다.")
+
+# 브라우저 위치 데이터 가져오기
+user_geo = get_geolocation()
 
 # 3. 카페 검색창
 search_term = st.selectbox(
@@ -65,20 +66,44 @@ if search_term != "선택하세요":
         st.session_state.map_center = [float(cafe_data['위도']), float(cafe_data['경도'])]
         st.session_state.map_zoom = 16
 
-# 4. 공간 트리 기반 빠르게 50개 카페 추출 함수
+# 4. 빠른 50개 카페 추출 함수
 def get_nearest_50_cafes_fast(center_lat, center_lon):
-    # cKDTree를 이용해 가장 가까운 50개 데이터 인덱스를 초고속 추출
+    target = np.array([center_lat, center_lon], dtype=np.float32)
+    dists = np.sum((coords_array - target) ** 2, axis=1)
     k = min(50, len(df))
-    distances, indices = spatial_tree.query([center_lat, center_lon], k=k)
-    return df.iloc[indices]
+    nearest_indices = np.argpartition(dists, k)[:k]
+    return df.iloc[nearest_indices]
 
-# 저장된 지도 중심점 및 Zoom 크기로 지도 생성
+# 지도 생성
 m = folium.Map(
     location=st.session_state.map_center, 
     zoom_start=st.session_state.map_zoom
 )
 
-# 화면 중앙 기준 가깝고 가장 유효한 50개 마커 표시
+# [추가된 기능] 사용자 현재 위치 마커 표시
+if user_geo:
+    user_lat = user_geo['coords']['latitude']
+    user_lon = user_geo['coords']['longitude']
+    
+    # 내 위치 파란색 마커 추가
+    folium.Marker(
+        location=[user_lat, user_lon],
+        popup="현재 내 위치",
+        tooltip="📍 현재 내 위치",
+        icon=folium.Icon(color='blue', icon='user', prefix='fa')
+    ).add_to(m)
+    
+    # 내 위치 주변 파란색 반경 원 추가
+    folium.Circle(
+        location=[user_lat, user_lon],
+        radius=30,
+        color='blue',
+        fill=True,
+        fill_color='blue',
+        fill_opacity=0.3
+    ).add_to(m)
+
+# 주변 50개 카페 마커 표시
 visible_df = get_nearest_50_cafes_fast(st.session_state.map_center[0], st.session_state.map_center[1])
 
 for idx, row in visible_df.iterrows():
@@ -89,7 +114,7 @@ for idx, row in visible_df.iterrows():
         icon=folium.Icon(color='orange', icon='coffee', prefix='fa')
     ).add_to(m)
 
-# 100m 구역 표시
+# 카페 100m 구역 표시 (빨간색)
 if st.session_state.active_zone:
     zone = st.session_state.active_zone
     folium.Circle(
@@ -110,21 +135,22 @@ map_data = st_folium(
     key="jeju_map"
 )
 
-# 5. 지도 상태 세션 업데이트
+# 5. 지도 위치/확대 상태 유지
 if map_data:
     if map_data.get("center") is not None:
         st.session_state.map_center = [map_data["center"]["lat"], map_data["center"]["lng"]]
     if map_data.get("zoom") is not None:
         st.session_state.map_zoom = map_data["zoom"]
 
-# 마커 클릭 처리 (초고속 인덱싱 알고리즘)
+# 마커 클릭 이벤트
 if map_data and map_data.get("last_object_clicked"):
     clicked_lat = map_data["last_object_clicked"]["lat"]
     clicked_lon = map_data["last_object_clicked"]["lng"]
     
-    # 클릭 위치에서 가장 가까운 카페 1개 빠르게 조회
-    dist, idx = spatial_tree.query([clicked_lat, clicked_lon], k=1)
-    cafe_data = df.iloc[idx]
+    target_click = np.array([clicked_lat, clicked_lon], dtype=np.float32)
+    dists = np.sum((coords_array - target_click) ** 2, axis=1)
+    nearest_idx = np.argmin(dists)
+    cafe_data = df.iloc[nearest_idx]
     
     new_zone = {
         'name': cafe_data['상호명'],
@@ -135,11 +161,9 @@ if map_data and map_data.get("last_object_clicked"):
         st.session_state.active_zone = new_zone
         st.rerun()
 
-# 6. 브라우저 위치 기반 구역 확인 및 인원수 카운트
+# 6. 사용자 위치 및 100m 구역 진입 판단
 st.markdown("---")
 st.subheader("📍 사용자 위치 기반 구역 확인")
-
-user_geo = get_geolocation()
 
 if user_geo and st.session_state.active_zone:
     user_lat = user_geo['coords']['latitude']
@@ -166,7 +190,7 @@ if user_geo and st.session_state.active_zone:
         
     st.metric(label="현재 구역 내 인원 수", value=f"{st.session_state.counter}명")
 else:
-    if not st.session_state.active_zone:
+    if not user_geo:
+        st.warning("브라우저 위치 권한을 '허용'해 주셔야 지도상에 내 위치가 표시됩니다.")
+    elif not st.session_state.active_zone:
         st.info("지도에서 카페 마커를 클릭하거나 상단 검색창에서 선택하여 100m 구역을 생성하세요.")
-    else:
-        st.info("브라우저 위치 권한 허용 팝업에서 '허용'을 누르면 구역 내 진입 여부를 확인합니다.")
