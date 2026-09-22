@@ -17,6 +17,8 @@ if 'counter' not in st.session_state:
     st.session_state.counter = 0
 if 'user_inside' not in st.session_state:
     st.session_state.user_inside = False
+if 'map_center' not in st.session_state:
+    st.session_state.map_center = [33.38, 126.53]  # 초기 지도 중심 (제주도 중앙)
 
 st.title("☕ 제주도 카페 위치 정보 & 구역 관리 앱")
 
@@ -26,7 +28,6 @@ def load_jeju_store_data():
     file_path = 'store (1).csv'
     if os.path.exists(file_path):
         df = pd.read_csv(file_path)
-        # 카페 관련 업종 필터링 (필요시) 및 결측치 제거
         df = df.dropna(subset=['상호명', '위도', '경도'])
         return df
     else:
@@ -36,6 +37,7 @@ def load_jeju_store_data():
 df = load_jeju_store_data()
 
 st.sidebar.write(f"📊 등록된 총 카페 수: **{len(df):,}개**")
+st.sidebar.info("📌 지도 화면 중앙에서 가장 가까운 카페 **50개만** 자동으로 표시됩니다.")
 
 # 2. 검색창 구현 (상호명으로 검색)
 search_term = st.selectbox(
@@ -51,19 +53,25 @@ if search_term != "선택하세요":
         'lat': float(cafe_data['위도']),
         'lon': float(cafe_data['경도'])
     }
+    # 검색된 카페 위치로 지도 중심 이동
+    st.session_state.map_center = [float(cafe_data['위도']), float(cafe_data['경도'])]
 
-# 지도 위치 및 축적 초기 설정
-default_lat, default_lon = 33.38, 126.53  # 제주 중심 좌표
+# 3. 지도 중심점 기준으로 가장 가까운 50개 카페 추출 함수
+def get_nearest_50_cafes(center_lat, center_lon, data):
+    # 각 카페와 지도 중심 간의 거리 계산 (유클리드 거리 근사치로 빠른 계산)
+    data_copy = data.copy()
+    data_copy['dist'] = (data_copy['위도'] - center_lat)**2 + (data_copy['경도'] - center_lon)**2
+    return data_copy.nsmallest(50, 'dist')
 
-initial_lat = st.session_state.active_zone['lat'] if st.session_state.active_zone else default_lat
-initial_lon = st.session_state.active_zone['lon'] if st.session_state.active_zone else default_lon
-initial_zoom = 18 if st.session_state.active_zone else 11
+# 지도 초기 설정
+initial_zoom = 16 if st.session_state.active_zone else 12
+m = folium.Map(location=st.session_state.map_center, zoom_start=initial_zoom)
 
-m = folium.Map(location=[initial_lat, initial_lon], zoom_start=initial_zoom)
+# 지도 중심 기반 상위 50개 카페 계산
+visible_df = get_nearest_50_cafes(st.session_state.map_center[0], st.session_state.map_center[1], df)
 
-# 3. 지도 상 마커 추가 (데이터가 많으므로 효율적인 마커 렌더링)
-# 선택된 카페가 없을 때 전역 마커 표시
-for idx, row in df.iterrows():
+# 상위 50개 마커 추가
+for idx, row in visible_df.iterrows():
     folium.Marker(
         location=[row['위도'], row['경도']],
         popup=row['상호명'],
@@ -71,7 +79,7 @@ for idx, row in df.iterrows():
         icon=folium.Icon(color='orange', icon='coffee', prefix='fa')
     ).add_to(m)
 
-# 선택된 카페 1곳에만 100m 반경 구역 표시
+# 선택된 카페가 있는 경우 100m 반경 구역 생성
 if st.session_state.active_zone:
     zone = st.session_state.active_zone
     folium.Circle(
@@ -84,15 +92,23 @@ if st.session_state.active_zone:
         popup=f"{zone['name']} (100m 구역)"
     ).add_to(m)
 
-# 지도 렌더링
-map_data = st_folium(m, width=800, height=500)
+# 지도 렌더링 (이동/확대 시 중심좌표 반환하도록 설정)
+map_data = st_folium(m, width=800, height=500, key="jeju_map")
 
-# 지도에서 마커 클릭 시 해당 카페 선택 및 구역 이동
+# 사용자가 지도를 이동시켰을 때 지도 중앙 좌표 업데이트
+if map_data and map_data.get("center"):
+    new_center = [map_data["center"]["lat"], map_data["center"]["lng"]]
+    # 감도 조절 (일정 수준 이상 이동했을 때만 계산 및 재렌더링)
+    if abs(new_center[0] - st.session_state.map_center[0]) > 0.005 or \
+       abs(new_center[1] - st.session_state.map_center[1]) > 0.005:
+        st.session_state.map_center = new_center
+        st.rerun()
+
+# 마커 클릭 시 100m 구역 설정
 if map_data and map_data.get("last_object_clicked"):
     clicked_lat = map_data["last_object_clicked"]["lat"]
     clicked_lon = map_data["last_object_clicked"]["lng"]
     
-    # 클릭된 위치 근처의 카페 찾아 지정
     matched = df[(abs(df['위도'] - clicked_lat) < 0.0001) & (abs(df['경도'] - clicked_lon) < 0.0001)]
     if not matched.empty:
         cafe_data = matched.iloc[0]
@@ -116,13 +132,11 @@ if user_geo and st.session_state.active_zone:
     zone_lat = st.session_state.active_zone['lat']
     zone_lon = st.session_state.active_zone['lon']
     
-    # 두 좌표 간 실시간 거리 계산 (미터 단위)
     distance = geodesic((user_lat, user_lon), (zone_lat, zone_lon)).meters
     
     st.write(f"현재 지정된 카페: **{st.session_state.active_zone['name']}**")
     st.write(f"카페 중심과의 거리: **{distance:.1f}m**")
     
-    # 100m 판정 및 인원수 카운트
     is_inside_now = distance <= 100
     
     if is_inside_now and not st.session_state.user_inside:
