@@ -27,7 +27,7 @@ if 'map_zoom' not in st.session_state:
 
 st.title("☕ 제주도 카페 위치 정보 & 구역 관리 앱")
 
-# 2. store (1).csv 파일 로드 및 랜덤 정보 자동 생성 (최적화 캐싱)
+# 2. store (1).csv 파일 로드 및 데이터 자동 할당 (캐싱)
 @st.cache_data
 def load_jeju_store_data():
     file_path = 'store (1).csv'
@@ -35,8 +35,12 @@ def load_jeju_store_data():
         df = pd.read_csv(file_path)
         df = df.dropna(subset=['상호명', '위도', '경도']).reset_index(drop=True)
         
-        # [자동 생성 기능] CSV 파일에 해당 항목이 없으면 자동으로 랜덤 데이터 할당
-        np.random.seed(42)  # 새로고침 시 데이터가 일관되게 유지되도록 고정
+        # '시군구명'이 없는 경우 기본값 처리
+        if '시군구명' not in df.columns:
+            df['시군구명'] = '제주시'
+            
+        # 랜덤 부가 정보 자동 할당
+        np.random.seed(42)
         if '좌석수' not in df.columns:
             df['좌석수'] = np.random.randint(10, 101, size=len(df))          # 10 ~ 100개
         if '콘센트수' not in df.columns:
@@ -44,29 +48,69 @@ def load_jeju_store_data():
         if '1인좌석비율' not in df.columns:
             df['1인좌석비율'] = np.random.randint(10, 61, size=len(df))      # 10 ~ 60%
         if '노트북사용가능' not in df.columns:
-            df['노트북사용가능'] = np.random.choice(['O', 'X'], size=len(df), p=[0.7, 0.3]) # O(70%), X(30%)
+            df['노트북사용가능'] = np.random.choice(['O', 'X'], size=len(df), p=[0.7, 0.3])
             
-        coords = df[['위도', '경도']].to_numpy(dtype=np.float32)
-        return df, coords
+        return df
     else:
-        st.error("`store (1).csv` 파일을 찾을 수 없습니다. 깃허브 리포지토리에 파일이 존재하는지 확인해주세요.")
+        st.error("`store (1).csv` 파일을 찾을 수 없습니다.")
         st.stop()
 
-df, coords_array = load_jeju_store_data()
+df = load_jeju_store_data()
 
-st.sidebar.write(f"📊 등록된 총 카페 수: **{len(df):,}개**")
+# ----------------------------------------------------
+# 🎛️ 사이드바: 필터링 섹션
+# ----------------------------------------------------
+st.sidebar.header("🔍 카페 상세 검색 필터")
+
+# 1. 지역별 필터
+region_options = ["전체"] + list(df['시군구명'].dropna().unique())
+selected_region = st.sidebar.selectbox("📍 지역 선택 (시/군/구)", region_options)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("⚙️ 시설 및 조건 필터")
+
+# 2. 시설 조건 필터
+min_seats = st.sidebar.slider("🪑 최소 좌석 수", min_value=10, max_value=100, value=10, step=5)
+min_outlets = st.sidebar.slider("🔌 최소 콘센트 수", min_value=2, max_value=30, value=2, step=1)
+min_single_ratio = st.sidebar.slider("👤 최소 1인 좌석 비율 (%)", min_value=10, max_value=60, value=10, step=5)
+
+laptop_option = st.sidebar.radio("💻 노트북 사용 가능 여부", ["전체", "가능 (O)", "불가 (X)"])
+
+# ----------------------------------------------------
+# 🧹 데이터 필터링 적용
+# ----------------------------------------------------
+filtered_df = df.copy()
+
+# 지역 필터
+if selected_region != "전체":
+    filtered_df = filtered_df[filtered_df['시군구명'] == selected_region]
+
+# 조건 필터
+filtered_df = filtered_df[
+    (filtered_df['좌석수'] >= min_seats) &
+    (filtered_df['콘센트수'] >= min_outlets) &
+    (filtered_df['1인좌석비율'] >= min_single_ratio)
+]
+
+# 노트북 필터
+if laptop_option == "가능 (O)":
+    filtered_df = filtered_df[filtered_df['노트북사용가능'] == 'O']
+elif laptop_option == "불가 (X)":
+    filtered_df = filtered_df[filtered_df['노트북사용가능'] == 'X']
+
+filtered_df = filtered_df.reset_index(drop=True)
+
+st.sidebar.success(f"🎯 조건에 맞는 카페: **{len(filtered_df):,}개** / 전체 {len(df):,}개")
 
 # 브라우저 위치 데이터 가져오기
 user_geo = get_geolocation()
 
-# 3. 카페 검색창
-search_term = st.selectbox(
-    "카페를 검색하세요:",
-    options=["선택하세요"] + list(df['상호명'].unique())
-)
+# 3. 카페 검색창 (필터링된 결과 중에서만 선택 가능)
+search_options = ["선택하세요"] + list(filtered_df['상호명'].unique()) if len(filtered_df) > 0 else ["조건에 맞는 카페가 없습니다"]
+search_term = st.selectbox("카페 선택/검색:", options=search_options)
 
-if search_term != "선택하세요":
-    cafe_data = df[df['상호명'] == search_term].iloc[0]
+if search_term not in ["선택하세요", "조건에 맞는 카페가 없습니다"]:
+    cafe_data = filtered_df[filtered_df['상호명'] == search_term].iloc[0]
     if st.session_state.selected_cafe is None or st.session_state.selected_cafe['상호명'] != search_term:
         st.session_state.selected_cafe = cafe_data
         st.session_state.active_zone = {
@@ -81,13 +125,16 @@ if search_term != "선택하세요":
         st.session_state.map_center = [float(cafe_data['위도']), float(cafe_data['경도'])]
         st.session_state.map_zoom = 16
 
-# 4. 상위 50개 카페 빠른 추출 함수
-def get_nearest_50_cafes_fast(center_lat, center_lon):
+# 4. 필터링된 카페 중 가까운 50개 마커 추출 함수
+def get_nearest_50_filtered_cafes(center_lat, center_lon, data_frame):
+    if len(data_frame) == 0:
+        return data_frame
+    coords = data_frame[['위도', '경도']].to_numpy(dtype=np.float32)
     target = np.array([center_lat, center_lon], dtype=np.float32)
-    dists = np.sum((coords_array - target) ** 2, axis=1)
-    k = min(50, len(df))
+    dists = np.sum((coords - target) ** 2, axis=1)
+    k = min(50, len(data_frame))
     nearest_indices = np.argpartition(dists, k)[:k]
-    return df.iloc[nearest_indices]
+    return data_frame.iloc[nearest_indices]
 
 # 지도 생성
 m = folium.Map(
@@ -116,13 +163,14 @@ if user_geo:
         fill_opacity=0.3
     ).add_to(m)
 
-# 주변 50개 카페 마커 표시 (클릭/마우스 대면 부가 정보 팝업 노출)
-visible_df = get_nearest_50_cafes_fast(st.session_state.map_center[0], st.session_state.map_center[1])
+# 필터 조건을 만족하는 50개 카페 마커 표시
+visible_df = get_nearest_50_filtered_cafes(st.session_state.map_center[0], st.session_state.map_center[1], filtered_df)
 
 for idx, row in visible_df.iterrows():
     popup_text = f"""
     <div style="width:160px">
         <b>{row['상호명']}</b><hr style="margin:5px 0;">
+        📍 <b>지역:</b> {row.get('시군구명', '-')}<br>
         🪑 <b>좌석 수:</b> {row['좌석수']}개<br>
         🔌 <b>콘센트 수:</b> {row['콘센트수']}개<br>
         👤 <b>1인 좌석 비율:</b> {row['1인좌석비율']}%<br>
@@ -136,7 +184,7 @@ for idx, row in visible_df.iterrows():
         icon=folium.Icon(color='orange', icon='coffee', prefix='fa')
     ).add_to(m)
 
-# 선택 카페 100m 구역 표시 (빨간 원)
+# 선택 카페 100m 구역 표시
 if st.session_state.active_zone:
     zone = st.session_state.active_zone
     folium.Circle(
@@ -156,7 +204,7 @@ map_data = st_folium(
     key="jeju_map"
 )
 
-# 5. 지도 위치/확대 세션 유지
+# 5. 지도 세션 상태 유지
 if map_data:
     if map_data.get("center") is not None:
         st.session_state.map_center = [map_data["center"]["lat"], map_data["center"]["lng"]]
@@ -168,23 +216,25 @@ if map_data and map_data.get("last_object_clicked"):
     clicked_lat = map_data["last_object_clicked"]["lat"]
     clicked_lon = map_data["last_object_clicked"]["lng"]
     
-    target_click = np.array([clicked_lat, clicked_lon], dtype=np.float32)
-    dists = np.sum((coords_array - target_click) ** 2, axis=1)
-    nearest_idx = np.argmin(dists)
-    cafe_data = df.iloc[nearest_idx]
-    
-    new_zone = {
-        'name': cafe_data['상호명'],
-        'lat': float(cafe_data['위도']),
-        'lon': float(cafe_data['경도']),
-        'seats': cafe_data['좌석수'],
-        'outlets': cafe_data['콘센트수'],
-        'single_ratio': cafe_data['1인좌석비율'],
-        'laptop': cafe_data['노트북사용가능']
-    }
-    if st.session_state.active_zone != new_zone:
-        st.session_state.active_zone = new_zone
-        st.rerun()
+    if len(filtered_df) > 0:
+        coords = filtered_df[['위도', '경도']].to_numpy(dtype=np.float32)
+        target_click = np.array([clicked_lat, clicked_lon], dtype=np.float32)
+        dists = np.sum((coords - target_click) ** 2, axis=1)
+        nearest_idx = np.argmin(dists)
+        cafe_data = filtered_df.iloc[nearest_idx]
+        
+        new_zone = {
+            'name': cafe_data['상호명'],
+            'lat': float(cafe_data['위도']),
+            'lon': float(cafe_data['경도']),
+            'seats': cafe_data['좌석수'],
+            'outlets': cafe_data['콘센트수'],
+            'single_ratio': cafe_data['1인좌석비율'],
+            'laptop': cafe_data['노트북사용가능']
+        }
+        if st.session_state.active_zone != new_zone:
+            st.session_state.active_zone = new_zone
+            st.rerun()
 
 # 6. 위치/인원수 재검색 & 카페 부가 정보 상세 보기
 st.markdown("---")
@@ -194,11 +244,9 @@ with col_title:
     st.subheader("📍 현재 위치 기반 구역 및 인원수 확인")
 
 with col_btn:
-    # 요청 기능 1: 위치 및 인원수 재검색 버튼
     if st.button("🔄 위치 및 인원수 재검색", use_container_width=True):
         st.rerun()
 
-# 요청 기능 2: 카페 선택 시 4가지 부가 정보 카드 형태 표시
 if st.session_state.active_zone:
     zone = st.session_state.active_zone
     st.markdown(f"### ☕ **{zone['name']}** 카페 정보")
