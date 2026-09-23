@@ -6,8 +6,7 @@ from streamlit_folium import st_folium
 from geopy.distance import geodesic
 from streamlit_js_eval import get_geolocation
 import os
-import re
-from collections import Counter
+import random
 
 st.set_page_config(page_title="제주 카페 위치 정보 앱", layout="wide")
 
@@ -21,7 +20,6 @@ if 'counter' not in st.session_state:
 if 'user_inside' not in st.session_state:
     st.session_state.user_inside = False
 if 'reviews' not in st.session_state:
-    # 예시 초기 리뷰 데이터
     st.session_state.reviews = {}
 
 # 지도 중심 좌표 및 확대 레벨 유지
@@ -44,6 +42,8 @@ def load_jeju_store_data():
             df['시군구명'] = '제주시'
             
         np.random.seed(42)
+        random.seed(42)
+        
         if '좌석수' not in df.columns:
             df['좌석수'] = np.random.randint(10, 101, size=len(df))
         if '콘센트수' not in df.columns:
@@ -53,7 +53,6 @@ def load_jeju_store_data():
         if '노트북사용가능' not in df.columns:
             df['노트북사용가능'] = np.random.choice(['O', 'X'], size=len(df), p=[0.7, 0.3])
             
-        # 대표 키워드 샘플 무작위 할당
         sample_keywords = [
             ["카공하기좋은", "콘센트많음", "조용한"],
             ["뷰가좋은", "디저트맛집", "친절한"],
@@ -61,7 +60,9 @@ def load_jeju_store_data():
             ["조용한", "1인석많음", "카공하기좋은"],
             ["디저트맛집", "인스타감성", "뷰가좋은"]
         ]
-        df['AI_키워드'] = [np.random.choice(sample_keywords) for _ in range(len(df))]
+        
+        # ValueError 해결: random.choice 사용
+        df['AI_키워드'] = [random.choice(sample_keywords) for _ in range(len(df))]
             
         return df
     else:
@@ -79,16 +80,13 @@ if not st.session_state.reviews:
             {"rating": 5, "text": "창밖으로 보이는 뷰가 예술입니다. 카공하기 좋은 테이블도 많아요!"}
         ]
 
-# ----------------------------------------------------
 # 🤖 AI 리뷰 요약 및 키워드 추출 함수
-# ----------------------------------------------------
 def analyze_reviews_ai(review_list):
     if not review_list:
         return "등록된 리뷰가 없습니다.", []
     
     full_text = " ".join([r['text'] for r in review_list])
     
-    # 1. 키워드 추출 규칙 기반 매핑
     keyword_map = {
         "카공": "카공하기좋은", "공부": "카공하기좋은", "노트북": "노트북편한",
         "콘센트": "콘센트많음", "조용": "조용한", "분위기": "분위기좋은",
@@ -107,9 +105,8 @@ def analyze_reviews_ai(review_list):
     if not extracted_keywords:
         extracted_keywords = ["추천카페"]
         
-    # 2. 요약문 생성
     avg_rating = np.mean([r['rating'] for r in review_list])
-    summary = f"⭐ 평균 평점 {avg_rating:.1f}점 / 주요 키워드: {', '.join(['#'+k for k in extracted_keywords])}. 방문객들이 대체로 만족하고 있습니다."
+    summary = f"⭐ 평균 평점 {avg_rating:.1f}점 / 주요 키워드: {', '.join(['#'+k for k in extracted_keywords])}. 방문객들의 만족도가 높습니다."
     
     return summary, extracted_keywords
 
@@ -143,24 +140,20 @@ laptop_option = st.sidebar.radio("💻 노트북 사용 가능 여부", ["전체
 # ----------------------------------------------------
 filtered_df = df.copy()
 
-# 지역 필터
 if selected_region != "전체":
     filtered_df = filtered_df[filtered_df['시군구명'] == selected_region]
 
-# AI 키워드 필터
 if selected_keywords:
     filtered_df = filtered_df[
         filtered_df['AI_키워드'].apply(lambda kw_list: any(k in kw_list for k in selected_keywords))
     ]
 
-# 시설 조건 필터
 filtered_df = filtered_df[
     (filtered_df['좌석수'] >= min_seats) &
     (filtered_df['콘센트수'] >= min_outlets) &
     (filtered_df['1인좌석비율'] >= min_single_ratio)
 ]
 
-# 노트북 필터
 if laptop_option == "가능 (O)":
     filtered_df = filtered_df[filtered_df['노트북사용가능'] == 'O']
 elif laptop_option == "불가 (X)":
@@ -170,10 +163,10 @@ filtered_df = filtered_df.reset_index(drop=True)
 
 st.sidebar.success(f"🎯 조건에 맞는 카페: **{len(filtered_df):,}개** / 전체 {len(df):,}개")
 
-# 위치 정보 연동
+# 브라우저 위치 정보 받아오기
 user_geo = get_geolocation()
 
-# 3. 카페 검색창
+# 카페 선택 Dropdown
 search_options = ["선택하세요"] + list(filtered_df['상호명'].unique()) if len(filtered_df) > 0 else ["조건에 맞는 카페가 없습니다"]
 search_term = st.selectbox("카페 선택/검색:", options=search_options)
 
@@ -193,7 +186,7 @@ if search_term not in ["선택하세요", "조건에 맞는 카페가 없습니�
         st.session_state.map_center = [float(cafe_data['위도']), float(cafe_data['경도'])]
         st.session_state.map_zoom = 16
 
-# 4. 가까운 카페 50개 추출
+# 지도에 표시할 가까운 카페 50개 추출
 def get_nearest_50_filtered_cafes(center_lat, center_lon, data_frame):
     if len(data_frame) == 0:
         return data_frame
@@ -210,7 +203,7 @@ m = folium.Map(
     zoom_start=st.session_state.map_zoom
 )
 
-# 사용자 내 위치
+# 사용자 내 위치 마커
 if user_geo:
     user_lat = user_geo['coords']['latitude']
     user_lon = user_geo['coords']['longitude']
@@ -231,7 +224,7 @@ if user_geo:
         fill_opacity=0.3
     ).add_to(m)
 
-# 50개 카페 마커 표시
+# 카페 마커 표시
 visible_df = get_nearest_50_filtered_cafes(st.session_state.map_center[0], st.session_state.map_center[1], filtered_df)
 
 for idx, row in visible_df.iterrows():
@@ -252,7 +245,7 @@ for idx, row in visible_df.iterrows():
         icon=folium.Icon(color='orange', icon='coffee', prefix='fa')
     ).add_to(m)
 
-# 구역 Circle
+# 지정 구역 Circle
 if st.session_state.active_zone:
     zone = st.session_state.active_zone
     folium.Circle(
@@ -272,14 +265,14 @@ map_data = st_folium(
     key="jeju_map"
 )
 
-# 지도 이동 세션
+# 지도 세션 유지
 if map_data:
     if map_data.get("center") is not None:
         st.session_state.map_center = [map_data["center"]["lat"], map_data["center"]["lng"]]
     if map_data.get("zoom") is not None:
         st.session_state.map_zoom = map_data["zoom"]
 
-# 마커 클릭
+# 마커 클릭 이벤트
 if map_data and map_data.get("last_object_clicked"):
     clicked_lat = map_data["last_object_clicked"]["lat"]
     clicked_lon = map_data["last_object_clicked"]["lng"]
@@ -304,7 +297,7 @@ if map_data and map_data.get("last_object_clicked"):
             st.session_state.active_zone = new_zone
             st.rerun()
 
-# 5. 카페 상세 정보 및 AI 리뷰 분석 섹션
+# 하단 정보 및 AI 리뷰 영역
 st.markdown("---")
 col_title, col_btn = st.columns([3, 1])
 
@@ -325,7 +318,6 @@ if st.session_state.active_zone:
     info_col3.metric("👤 1인 좌석 비율", f"{zone['single_ratio']}%")
     info_col4.metric("💻 노트북 사용", f"{zone['laptop']}")
 
-    # 📝 리뷰 및 AI 분석 탭
     tab1, tab2 = st.tabs(["🤖 AI 리뷰 요약 & 키워드", "✍️ 리뷰 작성 및 목록"])
     
     cafe_reviews = st.session_state.reviews.get(zone['name'], [])
@@ -339,11 +331,10 @@ if st.session_state.active_zone:
         st.markdown(kw_html, unsafe_allow_html=True)
         
     with tab2:
-        # 리뷰 입력 폼
         with st.form(key=f"review_form_{zone['name']}"):
             st.write("**새 리뷰 등록하기**")
             rating = st.slider("평점 선택", 1, 5, 5)
-            review_text = st.text_area("리뷰 내용을 작성해 주세요 (예: 콘센트가 많아서 노트북하기 좋아요)")
+            review_text = st.text_area("리뷰 내용을 작성해 주세요")
             submit_btn = st.form_submit_button("리뷰 제출")
             
             if submit_btn and review_text.strip():
@@ -352,11 +343,10 @@ if st.session_state.active_zone:
                     st.session_state.reviews[zone['name']] = []
                 st.session_state.reviews[zone['name']].append(new_entry)
                 
-                # 해당 카페의 AI 키워드 데이터 동적 반영
                 _, updated_kws = analyze_reviews_ai(st.session_state.reviews[zone['name']])
                 df.loc[df['상호명'] == zone['name'], 'AI_키워드'] = [updated_kws]
                 
-                st.success("리뷰가 정상 등록되었습니다! AI 분석 결과가 새로고침되었습니다.")
+                st.success("리뷰가 정상 등록되었습니다!")
                 st.rerun()
 
         st.markdown("---")
@@ -364,7 +354,7 @@ if st.session_state.active_zone:
         for r in reversed(cafe_reviews):
             st.write(f"{'⭐'*r['rating']} | {r['text']}")
 
-# 위치 판단
+# 거리 및 인원 계산
 if user_geo and st.session_state.active_zone:
     user_lat = user_geo['coords']['latitude']
     user_lon = user_geo['coords']['longitude']
